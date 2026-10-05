@@ -20,6 +20,7 @@ public class KeyRepository {
 
     private final FileStore store;
     private final ConcurrentHashMap<String, ReentrantLock> keyLocks = new ConcurrentHashMap<>();
+    private final ReentrantLock registrationLock = new ReentrantLock(true);
 
     public KeyRepository(FileStore store) {
         this.store = store;
@@ -30,6 +31,14 @@ public class KeyRepository {
      */
     public ReentrantLock lock(String keyId) {
         return keyLocks.computeIfAbsent(keyId, ignored -> new ReentrantLock());
+    }
+
+    /**
+     * 全局注册/轮换临界区：同一公钥材料以不同 keyId 并发注册时，
+     * 查重与写入必须作为一个整体串行，至多一个注册成功。
+     */
+    public ReentrantLock registrationLock() {
+        return registrationLock;
     }
 
     public List<PublicKeyRecord> findAll() {

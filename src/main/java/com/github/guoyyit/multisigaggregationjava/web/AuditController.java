@@ -21,7 +21,10 @@ public class AuditController {
 
     @GetMapping
     public Map<String, Object> entries() {
-        List<AuditEntry> entries = auditLog.entries();
-        return Map.of("entries", entries, "total", entries.size());
+        AuditLog.AuditRead read = auditLog.read();
+        return Map.of(
+                "entries", read.entries(),
+                "total", read.entries().size(),
+                "truncatedTrailingLines", read.truncatedTrailingLines());
     }
 }

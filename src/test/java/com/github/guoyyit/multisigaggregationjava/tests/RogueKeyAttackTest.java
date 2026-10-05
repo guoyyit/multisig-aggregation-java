@@ -52,7 +52,7 @@ class RogueKeyAttackTest extends ServiceTestBase {
                     () -> context.keyService().register(
                             "rogue-victim", "attacker",
                             victim.publicKeyHex(), victim.proofOfPossessionHex()));
-            assertEquals(ErrorCode.DUPLICATE_KEY_ID, cannotAssumeVictimKey.errorCode());
+            assertEquals(ErrorCode.DUPLICATE_PUBLIC_KEY, cannotAssumeVictimKey.errorCode());
         } finally {
             context.close();
         }

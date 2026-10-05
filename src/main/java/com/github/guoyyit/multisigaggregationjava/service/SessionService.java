@@ -422,6 +422,41 @@ public class SessionService {
     }
 
     /**
+     * 显式标记某参与方离线：会话立即转为 FAILED_RETRYABLE / OFFLINE，可重试。
+     * 离线是显式、可解释的终局原因，之后的超时扫描不得将其覆盖为 TIMEOUT。
+     */
+    public SessionRecord markParticipantOffline(String sessionId, String keyId, String detail) {
+        requireParticipant(sessionId, keyId);
+        ReentrantLock lock = sessions.lock(sessionId);
+        lock.lock();
+        try {
+            SessionRecord session = requireSession(sessionId);
+            if (session.state() == SessionState.FAILED_RETRYABLE
+                    && session.failureReason() == FailureReason.OFFLINE) {
+                return session;
+            }
+            if (!isOpen(session.state())) {
+                throw new ServiceException(ErrorCode.SESSION_NOT_ACTIVE,
+                        "会话状态 " + session.state() + " 不允许标记离线");
+            }
+            SessionRecord offline = new SessionRecord(
+                    session.sessionId(), session.messageHex(), session.participantKeyIds(),
+                    session.aggregatePubHex(), SessionState.FAILED_RETRYABLE,
+                    FailureReason.OFFLINE,
+                    session.createdAt(), session.deadlineMillis(), session.finalizedAt(),
+                    session.saltHex(), session.commitments(), session.nonces(),
+                    session.partialSignatures(), session.aggregateSignatureHex(),
+                    session.retryOf(), session.attempt());
+            sessions.save(offline);
+            audit.append("SESSION_FAILED", keyId, sessionId,
+                    "reason=OFFLINE, detail=" + (detail == null ? "" : detail));
+            return offline;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
      * 重试语义确定：仅 FAILED_RETRYABLE 可重试；取消（人为）不可重试；
      * 重试创建新会话与新 sessionId，随机数账本确保旧随机数不会被复用。
      */

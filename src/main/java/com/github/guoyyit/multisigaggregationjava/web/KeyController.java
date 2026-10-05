@@ -66,6 +66,24 @@ public class KeyController {
         return view(record);
     }
 
+    /**
+     * 查证（并重新验证）注册/轮换时持久化的所有权证明。
+     * 旧记录返回 LEGACY_MISSING、valid=false；正常记录返回 PRESENT 及重验结果。
+     */
+    @GetMapping("/{keyId}/proof")
+    public Map<String, Object> proof(@PathVariable String keyId) {
+        PublicKeyRecord record = keyService.get(keyId)
+                .orElseThrow(() -> new ServiceException(ErrorCode.KEY_NOT_FOUND));
+        KeyService.ProofVerification verification = keyService.verifyStoredProof(keyId);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("keyId", keyId);
+        body.put("pubHex", record.pubHex());
+        body.put("proofStatus", record.proofStatus().name());
+        body.put("popHex", record.popHex());
+        body.put("valid", verification.valid());
+        return body;
+    }
+
     @GetMapping
     public Map<String, Object> list(@RequestParam(required = false) String status) {
         KeyStatus keyStatus = null;
@@ -92,6 +110,8 @@ public class KeyController {
         view.put("keyId", record.keyId());
         view.put("owner", record.owner());
         view.put("pubHex", record.pubHex());
+        view.put("proofStatus", record.proofStatus().name());
+        view.put("popHex", record.popHex());
         view.put("status", record.status().name());
         view.put("version", record.version());
         view.put("registeredAt", record.registeredAt());

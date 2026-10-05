@@ -37,7 +37,7 @@ class CrashRecoveryTest extends ServiceTestBase {
         try {
             SessionRecord recovered = after.sessionService().get("crash-1");
             assertEquals(SessionState.FAILED_RETRYABLE, recovered.state());
-            assertEquals(FailureReason.RECOVERY_ABORTED, recovered.failureReason());
+            assertEquals(FailureReason.RECOVERY_INTERRUPTED, recovered.failureReason());
             assertTrue(recovered.aggregateSignatureHex() == null,
                     "重启后绝不把部分聚合当作完整签名返回");
 

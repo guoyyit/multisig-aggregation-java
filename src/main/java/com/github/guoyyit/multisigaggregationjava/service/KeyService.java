@@ -5,12 +5,15 @@ import com.github.guoyyit.multisigaggregationjava.core.Hex;
 import com.github.guoyyit.multisigaggregationjava.core.Schnorr;
 import com.github.guoyyit.multisigaggregationjava.core.ServiceException;
 import com.github.guoyyit.multisigaggregationjava.model.KeyStatus;
+import com.github.guoyyit.multisigaggregationjava.model.ProofStatus;
 import com.github.guoyyit.multisigaggregationjava.model.PublicKeyRecord;
 import com.github.guoyyit.multisigaggregationjava.store.AuditLog;
 import com.github.guoyyit.multisigaggregationjava.store.KeyRepository;
 import org.bouncycastle.math.ec.ECPoint;
 import org.springframework.stereotype.Service;
 
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.locks.ReentrantLock;
@@ -36,20 +39,28 @@ public class KeyService {
         if (popHex == null || popHex.isBlank()) {
             throw new ServiceException(ErrorCode.POP_MISSING);
         }
-        byte[] proof;
+        String canonicalPop;
         try {
-            proof = Hex.decode(popHex);
+            canonicalPop = Hex.encode(Hex.decode(popHex.trim()));
         } catch (IllegalArgumentException ex) {
             throw new ServiceException(ErrorCode.POP_INVALID, "PoP 编码无效");
         }
-        if (!Schnorr.verifyPop(point, proof)) {
+        if (!Schnorr.verifyPop(point, Hex.decode(canonicalPop))) {
             throw new ServiceException(ErrorCode.POP_INVALID);
         }
+        ReentrantLock global = keys.registrationLock();
         ReentrantLock lock = keys.lock(keyId);
+        global.lock();
         lock.lock();
         try {
             PublicKeyRecord existing = keys.findById(keyId).orElse(null);
             if (existing != null) {
+                if (existing.status() == KeyStatus.REVOKED
+                        && existing.proofStatus()
+                        == ProofStatus.NOT_APPLICABLE) {
+                    throw new ServiceException(ErrorCode.KEY_REVOKED,
+                            "该 keyId 已先于注册被撤销（撤销墓碑），禁止注册覆盖撤销");
+                }
                 if (existing.status() != KeyStatus.ACTIVE
                         || !safeEquals(existing.pubHex(), canonicalHex(pubHex))
                         || !safeEquals(existing.owner(), owner)) {
@@ -58,22 +69,31 @@ public class KeyService {
                 }
                 return existing;
             }
+            String canonicalPub = canonicalHex(pubHex);
             for (PublicKeyRecord other : keys.findAll()) {
                 if (other.status() == KeyStatus.ACTIVE
-                        && other.pubHex().equals(canonicalHex(pubHex))) {
-                    throw new ServiceException(ErrorCode.DUPLICATE_KEY_ID,
+                        && other.pubHex().equals(canonicalPub)) {
+                    throw new ServiceException(ErrorCode.DUPLICATE_PUBLIC_KEY,
                             "同一公钥已以 keyId=" + other.keyId() + " 注册");
                 }
             }
             PublicKeyRecord record = new PublicKeyRecord(
-                    keyId, owner, canonicalHex(pubHex), KeyStatus.ACTIVE, 1,
+                    keyId, owner, canonicalPub, canonicalPop,
+                    ProofStatus.PRESENT,
+                    KeyStatus.ACTIVE, 1,
                     System.currentTimeMillis(), 0L, null);
             keys.put(record);
             audit.append("KEY_REGISTERED", keyId, null,
-                    "owner=" + owner + ", pub=" + record.pubHex());
+                    "owner=" + owner + ", pub=" + record.pubHex()
+                            + ", proofStatus=PRESENT, popFingerprint=" + popFingerprint(canonicalPop));
             return record;
         } finally {
-            lock.unlock();
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
+            if (global.isHeldByCurrentThread()) {
+                global.unlock();
+            }
         }
     }
 
@@ -88,11 +108,22 @@ public class KeyService {
         }
         PublicKeyRecord oldRecord = requireActive(oldKeyId);
         ECPoint point = parsePublicKey(newPubHex);
-        if (popHex == null || !Schnorr.verifyPop(point, Hex.decode(popHex))) {
+        if (popHex == null || popHex.isBlank()) {
+            throw new ServiceException(ErrorCode.POP_MISSING);
+        }
+        String canonicalPop;
+        try {
+            canonicalPop = Hex.encode(Hex.decode(popHex.trim()));
+        } catch (IllegalArgumentException ex) {
+            throw new ServiceException(ErrorCode.POP_INVALID, "PoP 编码无效");
+        }
+        if (!Schnorr.verifyPop(point, Hex.decode(canonicalPop))) {
             throw new ServiceException(ErrorCode.POP_INVALID);
         }
+        ReentrantLock global = keys.registrationLock();
         ReentrantLock oldLock = keys.lock(oldKeyId);
         ReentrantLock newLock = keys.lock(newKeyId);
+        global.lock();
         lockBoth(oldLock, newLock);
         try {
             PublicKeyRecord reloadedOld = keys.findById(oldKeyId)
@@ -106,22 +137,25 @@ public class KeyService {
             String canonicalNew = canonicalHex(newPubHex);
             for (PublicKeyRecord other : keys.findAll()) {
                 if (other.status() == KeyStatus.ACTIVE && other.pubHex().equals(canonicalNew)) {
-                    throw new ServiceException(ErrorCode.DUPLICATE_KEY_ID,
+                    throw new ServiceException(ErrorCode.DUPLICATE_PUBLIC_KEY,
                             "同一公钥已以 keyId=" + other.keyId() + " 注册");
                 }
             }
             PublicKeyRecord superseded = new PublicKeyRecord(
                     reloadedOld.keyId(), reloadedOld.owner(), reloadedOld.pubHex(),
+                    reloadedOld.popHex(), reloadedOld.proofStatus(),
                     KeyStatus.SUPERSEDED, reloadedOld.version() + 1,
                     reloadedOld.registeredAt(), System.currentTimeMillis(), newKeyId);
             PublicKeyRecord fresh = new PublicKeyRecord(
-                    newKeyId, reloadedOld.owner(), canonicalNew, KeyStatus.ACTIVE, 1,
+                    newKeyId, reloadedOld.owner(), canonicalNew, canonicalPop,
+                    ProofStatus.PRESENT, KeyStatus.ACTIVE, 1,
                     System.currentTimeMillis(), 0L, null);
             keys.put(superseded);
             keys.put(fresh);
             audit.append("KEY_ROTATED", oldKeyId, null, "replacedBy=" + newKeyId);
             audit.append("KEY_REGISTERED", newKeyId, null,
-                    "rotatedFrom=" + oldKeyId + ", pub=" + fresh.pubHex());
+                    "rotatedFrom=" + oldKeyId + ", pub=" + fresh.pubHex()
+                            + ", proofStatus=PRESENT, popFingerprint=" + popFingerprint(canonicalPop));
             return fresh;
         } finally {
             if (oldLock.isHeldByCurrentThread()) {
@@ -130,6 +164,9 @@ public class KeyService {
             if (newLock.isHeldByCurrentThread()) {
                 newLock.unlock();
             }
+            if (global.isHeldByCurrentThread()) {
+                global.unlock();
+            }
         }
     }
 
@@ -137,29 +174,64 @@ public class KeyService {
      * 撤销：密钥立即不能参与新会话；历史会话文件中的快照公钥仍可验证历史聚合签名。
      */
     public PublicKeyRecord revoke(String keyId, String reason) {
+        ReentrantLock global = keys.registrationLock();
         ReentrantLock lock = keys.lock(keyId);
+        global.lock();
         lock.lock();
         try {
-            PublicKeyRecord record = keys.findById(keyId)
-                    .orElseThrow(() -> new ServiceException(ErrorCode.KEY_NOT_FOUND));
+            PublicKeyRecord record = keys.findById(keyId).orElse(null);
+            if (record == null) {
+                // 先撤销后注册：写入撤销墓碑，随后的注册必须被明确拒绝；
+                // 墓碑没有公钥材料，因此不参与任何公钥查重。
+                long now = System.currentTimeMillis();
+                PublicKeyRecord tombstone = new PublicKeyRecord(
+                        keyId, "", null, null, ProofStatus.NOT_APPLICABLE,
+                        KeyStatus.REVOKED, 1, now, now, null);
+                keys.put(tombstone);
+                audit.append("KEY_REVOKED", keyId, null,
+                        "tombstone=true"
+                                + (reason == null || reason.isBlank() ? "" : ", reason=" + reason));
+                return tombstone;
+            }
             if (record.status() == KeyStatus.REVOKED) {
                 return record;
             }
             PublicKeyRecord revoked = new PublicKeyRecord(
-                    record.keyId(), record.owner(), record.pubHex(), KeyStatus.REVOKED,
+                    record.keyId(), record.owner(), record.pubHex(),
+                    record.popHex(), record.proofStatus(), KeyStatus.REVOKED,
                     record.version() + 1, record.registeredAt(),
                     System.currentTimeMillis(), record.replacedById());
             keys.put(revoked);
             audit.append("KEY_REVOKED", keyId, null,
-                    reason == null ? "" : reason);
+                    "tombstone=false" + (reason == null ? "" : ", reason=" + reason));
             return revoked;
         } finally {
             lock.unlock();
+            global.unlock();
         }
     }
 
     public Optional<PublicKeyRecord> get(String keyId) {
         return keys.findById(keyId);
+    }
+
+    /**
+     * 用注册时持久化的所有权证明重新验证对应公钥。
+     * 升级前旧记录（LEGACY_MISSING）与撤销墓碑（NOT_APPLICABLE）无证明可验，
+     * 返回各自可解释状态，由调用方区分。
+     */
+    public ProofVerification verifyStoredProof(String keyId) {
+        PublicKeyRecord record = keys.findById(keyId)
+                .orElseThrow(() -> new ServiceException(ErrorCode.KEY_NOT_FOUND));
+        if (record.proofStatus() != ProofStatus.PRESENT) {
+            return new ProofVerification(record.proofStatus(), false);
+        }
+        ECPoint point = parsePublicKey(record.pubHex());
+        boolean valid = Schnorr.verifyPop(point, Hex.decode(record.popHex()));
+        return new ProofVerification(ProofStatus.PRESENT, valid);
+    }
+
+    public record ProofVerification(ProofStatus proofStatus, boolean valid) {
     }
 
     public List<PublicKeyRecord> list(KeyStatus status) {
@@ -197,6 +269,19 @@ public class KeyService {
 
     static String canonicalHex(String pubHex) {
         return Hex.encode(Hex.decode(pubHex.trim().toLowerCase()));
+    }
+
+    /**
+     * 审计中只记录证明内容的 SHA-256 指纹用于事后核对，绝不记录私钥材料，
+     * 证明本身（对压缩公钥哈希的 Schnorr 签名）不含私钥，可完整持久化。
+     */
+    static String popFingerprint(String popHex) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            return Hex.encode(digest.digest(Hex.decode(popHex)));
+        } catch (NoSuchAlgorithmException ex) {
+            throw new IllegalStateException(ex);
+        }
     }
 
     private static void validateId(String id) {

@@ -15,6 +15,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
+import java.util.stream.Stream;
 
 @Component
 public class FileStore {
@@ -38,6 +39,31 @@ public class FileStore {
             } catch (IOException ex) {
                 throw new IllegalStateException("无法初始化存储目录: " + root, ex);
             }
+        }
+        cleanupTemporaryFiles();
+    }
+
+    /**
+     * 崩溃可能在原子重命名前留下 {@code *.tmp-<uuid>} 中间文件。
+     * 每次启动统一清理，长期运行与反复崩溃都不会积累垃圾文件；
+     * 正式数据文件均以 .json/.jsonl 结尾，不受影响。
+     */
+    private void cleanupTemporaryFiles() {
+        try (Stream<Path> walk = Files.walk(root)) {
+            walk.filter(Files::isRegularFile)
+                    .filter(path -> {
+                        String name = path.getFileName().toString();
+                        return name.contains(".tmp-");
+                    })
+                    .forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                        } catch (IOException ignored) {
+                            // 删除失败不阻断启动；该文件仍带 .tmp- 前缀，不会被任何加载逻辑读取。
+                        }
+                    });
+        } catch (IOException ex) {
+            throw new IllegalStateException("启动清理临时文件失败: " + root, ex);
         }
     }
 
@@ -63,6 +89,10 @@ public class FileStore {
 
     public Path auditDir() {
         return root.resolve("audit");
+    }
+
+    public Path auditQuarantineDir() {
+        return root.resolve("audit").resolve("quarantine");
     }
 
     public ObjectMapper mapper() {

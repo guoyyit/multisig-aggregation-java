@@ -7,6 +7,7 @@ public enum ErrorCode {
     POP_INVALID("POP_INVALID", "公钥所有权证明验证失败"),
     KEY_NOT_FOUND("KEY_NOT_FOUND", "公钥不存在"),
     DUPLICATE_KEY_ID("DUPLICATE_KEY_ID", "密钥 ID 已存在"),
+    DUPLICATE_PUBLIC_KEY("DUPLICATE_PUBLIC_KEY", "同一公钥材料已被其他密钥标识注册"),
     KEY_REVOKED("KEY_REVOKED", "公钥已被撤销"),
     KEY_SUPERSEDED("KEY_SUPERSEDED", "公钥已被轮换取代"),
     INVALID_MESSAGE("INVALID_MESSAGE", "消息编码无效"),
@@ -23,6 +24,7 @@ public enum ErrorCode {
     SESSION_NOT_READY("SESSION_NOT_READY", "尚未收集到全部部分签名"),
     SESSION_NOT_RETRYABLE("SESSION_NOT_RETRYABLE", "该会话不可重试"),
     SESSION_EXPIRED("SESSION_EXPIRED", "会话已超时"),
+    PARTICIPANT_OFFLINE("PARTICIPANT_OFFLINE", "参与方已被显式标记为离线"),
     CONCURRENT_UPDATE("CONCURRENT_UPDATE", "并发更新冲突，请重试"),
     INTERNAL_ERROR("INTERNAL_ERROR", "内部错误");
 
