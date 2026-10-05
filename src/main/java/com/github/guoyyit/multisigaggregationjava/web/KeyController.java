@@ -66,6 +66,11 @@ public class KeyController {
         return view(record);
     }
 
+    @GetMapping("/{keyId}/pop")
+    public Map<String, Object> proofOfPossession(@PathVariable String keyId) {
+        return keyService.proofOfPossession(keyId);
+    }
+
     @GetMapping
     public Map<String, Object> list(@RequestParam(required = false) String status) {
         KeyStatus keyStatus = null;
@@ -97,6 +102,7 @@ public class KeyController {
         view.put("registeredAt", record.registeredAt());
         view.put("revokedAt", record.revokedAt());
         view.put("replacedById", record.replacedById());
+        view.put("popStatus", record.popStatus());
         return view;
     }
 }

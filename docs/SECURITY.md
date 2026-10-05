@@ -64,7 +64,7 @@ Schnorr 签名，验证互通（见 `MultisigFlowTest.singleSignerFlowIsPlainSch
 - 任何重用/冲突都会把会话置为失败态，**不产生可用签名**；由于部分签名在服务端即时验证，
   重用尝试不会推进到聚合阶段，也不会泄露私钥。
 
-## 5. 会话生命周期
+## 5. 会话生命周期与失败原因
 
 状态机：
 
@@ -77,19 +77,29 @@ COLLECTING_COMMITMENTS
 任一开放态 --(校验失败/重用)--> FAILED_RETRYABLE
 任一开放态 --(显式取消)------> FAILED_CANCELLED（不可重试）
 任一开放态 --(越过 deadline)--> EXPIRED（可重试）
+任一开放态 --(显式标记离线)--> FAILED_RETRYABLE（原因 OFFLINE，可重试）
 ```
 
-- **离线 / 超时**：后台扫描（`SessionSweeper`，默认每 5 秒）和每次访问都会检查
-  `deadlineMillis`；超时进入 `EXPIRED`，原因 `TIMEOUT`。
+- **离线 / 超时区分**：两类停滞原因可区分且互不覆盖——
+  - **超时**：后台扫描（`SessionSweeper`，默认每 5 秒）和每次访问都会检查
+    `deadlineMillis`；越过截止时间进入 `EXPIRED`，原因 `TIMEOUT`。
+  - **离线**：`POST /api/sessions/{id}/offline`（请求体 `{"keyId","reason"}`）把开放中
+    会话显式置为 `FAILED_RETRYABLE`，原因 `OFFLINE`，并写入 `SESSION_OFFLINE` 审计
+    （含参与方 keyId）。离线判定只来自该显式入口，服务不擅自猜测网络状态。
+  - 已标记 OFFLINE 的会话不再是开放态，随后的超时扫描**不会改写**其原因；
+    已超时终结的会话再标记离线会被 `SESSION_NOT_ACTIVE` 拒绝，反之亦然，
+    两类原因始终保持可区分。重复标记同一离线状态幂等，只产生一条审计。
 - **无效承诺 / 随机数 / 部分签名**：进入 `FAILED_RETRYABLE`，`failureReason` 分别为
   `INVALID_COMMITMENT / INVALID_NONCE / INVALID_PARTIAL_SIGNATURE / NONCE_REUSE`。
 - **取消**：显式 `POST /api/sessions/{id}/cancel` 进入 `FAILED_CANCELLED`，
   原因 `CANCELLED`，**不可重试**（语义确定）。
-- **重试**：仅 `FAILED_RETRYABLE` / `EXPIRED` 可重试；重试创建**新会话**
+- **重试**：仅 `FAILED_RETRYABLE`（含 OFFLINE）/ `EXPIRED` 可重试；重试创建**新会话**
   （`{id}-r{n}`，`retryOf` 指向上次，`attempt` 递增），使用全新盐与随机数，
   超过 `multisig.max-attempts`（默认 5）返回 `SESSION_NOT_RETRYABLE`。
 - **幂等**：重复提交同一承诺/随机数/部分签名原样成功；对已完成会话重复提交已有的
   部分签名也幂等返回；提交冲突内容则失败。
+- **查询与审计**：会话查询结果中的 `failureReason` 与审计事件（`SESSION_OFFLINE` /
+  `SESSION_EXPIRED` / `SESSION_FAILED` / `SESSION_RECOVERED`）给出可区分的失败原因。
 
 ## 6. 密钥轮换与撤销
 
@@ -102,18 +112,59 @@ COLLECTING_COMMITMENTS
 - 所有注册/轮换/撤销/会话关键动作写入 `data/audit/events.jsonl`，可经
   `GET /api/audit` 追溯。
 
+### 6.1 所有权证明（PoP）的持久化与兼容
+
+- 注册与轮换时提交的 PoP 随公钥记录一并持久化（`popHex` 字段），被轮换
+  （`SUPERSEDED`）或被撤销（`REVOKED`）的密钥同样保留其证明记录。
+- 重启后可经 `GET /api/keys/{keyId}/pop` 取回历史上提交的证明，响应中的
+  `valid` 字段是服务端用该证明对当前记录公钥**即时重验**的结果；
+  调用方也可自行用 `Schnorr.verifyPop` 规则独立重验。
+- 公钥查询视图中的 `popStatus` 标明证明状态：`PRESENT`（已持久化证明）或
+  `LEGACY_MISSING`（升级前写入的旧记录不含证明）。
+- **旧数据兼容**：升级前已存在的注册记录没有 `popHex` 字段，服务照常加载，
+  不启动失败、不丢数据；这些记录保持 `ACTIVE` 可参与新会话，历史签名验证不受影响，
+  其 `popStatus=LEGACY_MISSING` 是明确可解释的正常状态。
+- 注册/轮换的审计事件（`KEY_REGISTERED` / `KEY_ROTATED`）在 `detail` 中携带
+  当时提交的 `pop=` 证明，便于事后核对；PoP 是对公钥的 Schnorr 签名，属于公开材料，
+  审计**不含任何私钥**。
+
 ## 7. 崩溃恢复与持久化
 
 - 公钥、会话、随机数账本、签名方材料、审计日志都落盘在 `multisig.store-dir`
   （默认 `./data`）。JSON 采用临时文件 + 原子 rename，避免半截文件覆盖。
-- 重启时 `RecoveryService` 扫描全部会话，把未终结会话显式标记为
-  `FAILED_RETRYABLE / RECOVERY_ABORTED`，可由用户决定重试；绝不会把已收集的部分签名
-  当作完整签名返回。
+- 重启时 `RecoveryService` 扫描全部会话，把未终结会话按**是否已越过截止时间**
+  区分恢复原因：
+  - 已越过 `deadlineMillis`：按超时处理为 `EXPIRED / TIMEOUT`，审计 `SESSION_EXPIRED`
+    （`detail` 含 `trigger=recovery`）；
+  - 未越过：按崩溃中断处理为 `FAILED_RETRYABLE / RECOVERY_ABORTED`，
+    审计 `SESSION_RECOVERED`。
+  两类恢复原因在会话查询与审计中都可区分，恢复后的会话均可重试；
+  绝不会把已收集的部分签名当作完整签名返回。
+- **恢复幂等**：恢复以会话终态为锚点，同一会话只会被转换并审计一次；
+  重复执行恢复动作或反复重启不会产生重复审计记录。
+- **临时文件清理**：异常退出可能在数据目录留下 `*.tmp-*` 中间文件；
+  服务启动时自动扫描并删除这些残留（原子写入保证目标文件始终是完整版本，
+  残留临时文件一定是未完成的中间产物），长期运行与反复崩溃不会积累垃圾文件。
+- **审计完整性**：审计日志按行追加。崩溃可能留下未写完整的末行——读取审计时
+  不完整行不会静默丢弃，而是计入 `GET /api/audit` 响应的 `corruptedLines`
+  （`AuditLog.readAll()` 同样暴露该计数），完整历史事件保持可追溯。
 - 随机数账本跨重启保留，重试会话使用新 `sessionId` ⇒ 新随机数，杜绝跨重启重用。
 
 ## 8. 并发模型
 
-- 每个 keyId、每个 sessionId 各有一把可重入锁，读-改-写串行化，保证注册/撤销不会相互覆盖。
+- 每个 keyId、每个 sessionId 各有一把可重入锁，读-改-写串行化，
+  保证同一 keyId 的注册/撤销不会相互覆盖。
+- 另有一把**全局注册锁**保护“检查公钥唯一性 + 写入新记录”的临界区，
+  锁序固定为 keyId 锁 → 全局注册锁，持锁期间不再获取其他锁，无死锁。
+- **交错确定性语义**：
+  - 同一 keyId 的注册与撤销按真实执行顺序生效：先注册后撤销得到 `REVOKED`；
+    先撤销（keyId 不存在）则撤销被 `KEY_NOT_FOUND` 明确拒绝，后续注册正常成功；
+    撤销完成后再用同 keyId 注册被 `DUPLICATE_KEY_ID` 拒绝——注册不得覆盖撤销，
+    撤销不会丢失，也不会出现半写入中间状态。
+  - 同一公钥材料以不同 keyId 并发注册时至多一个成功，其余得到可区分的
+    `DUPLICATE_PUBLIC_KEY`；同一公钥绝不会被登记两次。
+  - 并发结束后重启服务，磁盘上的最终状态与接口返回的状态一致
+    （见 `ConcurrencyDeterminismTest`）。
 - 随机数账本使用全局短锁保证“检查-登记”原子性。
 - 原子文件写入使用唯一临时文件名，避免同线程并发写互相踩踏。
 
@@ -126,7 +177,8 @@ COLLECTING_COMMITMENTS
 | `POP_MISSING` | 注册/轮换缺少所有权证明 |
 | `POP_INVALID` | 所有权证明验证失败（未掌握对应私钥） |
 | `KEY_NOT_FOUND` | 公钥不存在（HTTP 404） |
-| `DUPLICATE_KEY_ID` | keyId 已存在、会话 ID 冲突，或同一公钥重复注册 |
+| `DUPLICATE_KEY_ID` | keyId 已存在（含已撤销记录）、会话 ID 冲突 |
+| `DUPLICATE_PUBLIC_KEY` | 同一公钥已以其他 keyId 注册（与 keyId 冲突可区分） |
 | `KEY_REVOKED` | 公钥已撤销，不能参与新会话 |
 | `KEY_SUPERSEDED` | 公钥已被轮换取代 |
 | `INVALID_MESSAGE` | 消息为空或不是合法 hex |

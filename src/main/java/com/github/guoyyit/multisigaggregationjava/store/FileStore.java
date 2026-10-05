@@ -39,6 +39,36 @@ public class FileStore {
                 throw new IllegalStateException("无法初始化存储目录: " + root, ex);
             }
         }
+        cleanupStaleTempFiles();
+    }
+
+    /**
+     * 清理上次异常退出残留的临时写入文件（*.tmp-*）。
+     * 原子写入保证目标文件要么是旧的完整内容、要么是新的完整内容，
+     * 残留临时文件一定是未完成的中间产物，可安全删除。
+     *
+     * @return 清理掉的文件数
+     */
+    public int cleanupStaleTempFiles() {
+        int removed = 0;
+        for (String sub : List.of("keys", "sessions", "nonces", "signers", "audit")) {
+            Path dir = root.resolve(sub);
+            try (var files = Files.list(dir)) {
+                for (Path stale : files
+                        .filter(p -> p.getFileName().toString().contains(".tmp-"))
+                        .toList()) {
+                    try {
+                        Files.deleteIfExists(stale);
+                        removed++;
+                    } catch (IOException ex) {
+                        throw new IllegalStateException("无法清理残留临时文件: " + stale, ex);
+                    }
+                }
+            } catch (IOException ex) {
+                throw new IllegalStateException("无法扫描存储目录: " + dir, ex);
+            }
+        }
+        return removed;
     }
 
     public Path root() {

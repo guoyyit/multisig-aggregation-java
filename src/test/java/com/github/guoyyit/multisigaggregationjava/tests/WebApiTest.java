@@ -65,6 +65,54 @@ class WebApiTest extends ServiceTestBase {
     }
 
     @Test
+    void proofOfPossessionIsQueryableOverHttp() throws Exception {
+        LocalSigner signer = LocalSigner.generate("web-pop", context.fileStore());
+        String pop = signer.proofOfPossessionHex();
+        String registerBody = "{\"keyId\":\"web-pop\",\"owner\":\"o\",\"pubHex\":\""
+                + signer.publicKeyHex() + "\",\"popHex\":\"" + pop + "\"}";
+        mvc.perform(post("/api/keys/register")
+                        .contentType(MediaType.APPLICATION_JSON).content(registerBody))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.popStatus").value("PRESENT"));
+
+        mvc.perform(get("/api/keys/web-pop/pop"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.popStatus").value("PRESENT"))
+                .andExpect(jsonPath("$.popHex").value(pop))
+                .andExpect(jsonPath("$.valid").value(true));
+    }
+
+    @Test
+    void offlineMarkingAndAuditCorruptionCounterOverHttp() throws Exception {
+        LocalSigner signer = LocalSigner.generate("web-off", context.fileStore());
+        String registerBody = "{\"keyId\":\"web-off\",\"owner\":\"o\",\"pubHex\":\""
+                + signer.publicKeyHex() + "\",\"popHex\":\""
+                + signer.proofOfPossessionHex() + "\"}";
+        mvc.perform(post("/api/keys/register")
+                        .contentType(MediaType.APPLICATION_JSON).content(registerBody))
+                .andExpect(status().isOk());
+
+        String messageHex = Hex.encode("web offline".getBytes(StandardCharsets.UTF_8));
+        String createBody = "{\"sessionId\":\"web-off-1\",\"messageHex\":\"" + messageHex
+                + "\",\"participantKeyIds\":[\"web-off\"]}";
+        mvc.perform(post("/api/sessions")
+                        .contentType(MediaType.APPLICATION_JSON).content(createBody))
+                .andExpect(status().isOk());
+
+        mvc.perform(post("/api/sessions/web-off-1/offline")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"keyId\":\"web-off\",\"reason\":\"unreachable\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.state").value("FAILED_RETRYABLE"))
+                .andExpect(jsonPath("$.failureReason").value("OFFLINE"));
+
+        mvc.perform(get("/api/audit"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.corruptedLines").value(0))
+                .andExpect(jsonPath("$.total").isNumber());
+    }
+
+    @Test
     void fullHttpRoundTripForSingleSigner() throws Exception {
         FileStore store = context.fileStore();
         LocalSigner signer = LocalSigner.generate("web-solo", store);

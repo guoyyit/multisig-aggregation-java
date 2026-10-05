@@ -33,18 +33,20 @@ mvn -o clean package && java -jar target/multisig-aggregation-java-1.0-SNAPSHOT.
 | `POST /api/keys/rotate` | 轮换密钥（旧 → SUPERSEDED，新 → ACTIVE） |
 | `POST /api/keys/{keyId}/revoke` | 撤销密钥 |
 | `GET  /api/keys/{keyId}` / `GET /api/keys?status=ACTIVE` | 查询公钥 |
+| `GET  /api/keys/{keyId}/pop` | 查询随注册持久化的所有权证明并即时重验 |
 | `POST /api/sessions` | 创建签名会话（固定参与方、消息、聚合公钥快照） |
 | `POST /api/sessions/{id}/commitments` | 第一轮：提交承诺 |
 | `POST /api/sessions/{id}/nonces` | 第二轮：公开随机数（含重用检测） |
 | `POST /api/sessions/{id}/partials` | 第三轮：提交部分签名（收齐即聚合完成） |
 | `POST /api/sessions/{id}/cancel` | 取消（不可重试） |
+| `POST /api/sessions/{id}/offline` | 显式标记参与方离线（会话以 OFFLINE 失败，可重试） |
 | `POST /api/sessions/{id}/retry` | 重试失败/超时会话（新会话、新随机数） |
 | `GET  /api/sessions/{id}` | 查询会话状态 |
 | `POST /api/aggregate/key` | 计算一组 keyId 的聚合公钥 |
 | `POST /api/aggregate/{id}/finalize` | 显式聚合（缺额返回 SESSION_INCOMPLETE） |
 | `POST /api/aggregate/verify` | 用聚合公钥验证最终签名 |
 | `GET  /api/aggregate/{id}/partials-check` | 逐一验证全部部分签名 |
-| `GET  /api/audit` | 查询可追溯审计事件 |
+| `GET  /api/audit` | 查询可追溯审计事件（含 `corruptedLines` 损坏行计数） |
 
 ## 端到端约定
 
@@ -60,14 +62,20 @@ mvn -o clean package && java -jar target/multisig-aggregation-java-1.0-SNAPSHOT.
 mvn -o test
 ```
 
-覆盖场景（共 23 个用例）：
+覆盖场景（共 39 个用例）：
 
 - 密码学自检：Schnorr 签名/验证、PoP、单签退化、手工三方聚合
 - 完整多方流程：聚合验证通过、与逐一验证一致、篡改消息失败、单签互通
 - 恶意公钥：无 PoP/伪造 PoP 注册被拒、冒名注册被拒、经典 rogue-key 失效
 - 随机数重用：冲突承诺、会话内重复、跨会话重用，错误码可区分
-- 生命周期：离线超时、取消不可重试、失败重试成功、拒绝不完整聚合
+- 生命周期：超时、显式离线（OFFLINE 与 TIMEOUT 可区分）、取消不可重试、
+  失败重试成功、拒绝不完整聚合
 - 轮换撤销：撤销不入新会、话、历史签名仍可验证、轮换产生新聚合公钥
-- 并发：并发注册/多会话推进、重复注册与重复部分签名幂等
-- 崩溃恢复：未完成会话重启后标记失效、重试完成、恢复动作可审计
-- Web 层：错误码 HTTP 映射与单签 HTTP 全链路
+- 并发：并发注册/多会话推进、重复注册与重复部分签名幂等；
+  注册/撤销交错与真实执行顺序一致、同一公钥并发注册至多一个成功
+  （其余得 `DUPLICATE_PUBLIC_KEY`）、并发结束后重启磁盘状态一致
+- 所有权证明持久化：注册/轮换证明随记录落盘、重启后可查询并重验、
+  轮换/撤销密钥证明保留、旧格式记录（无证明）兼容加载且可参与新会话
+- 崩溃恢复：未完成会话按是否越过截止时间区分恢复原因（TIMEOUT / RECOVERY_ABORTED）、
+  重试完成、恢复动作可审计且幂等、临时文件残留自动清理、审计损坏末行可计数检测
+- Web 层：错误码 HTTP 映射、单签 HTTP 全链路、PoP 查询与离线标记端点

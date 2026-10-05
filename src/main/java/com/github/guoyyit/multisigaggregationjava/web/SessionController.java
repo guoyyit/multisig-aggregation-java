@@ -29,6 +29,9 @@ public class SessionController {
     public record PartialRequest(String keyId, String partialHex) {
     }
 
+    public record OfflineRequest(String keyId, String reason) {
+    }
+
     private final SessionService sessions;
     private final AggregationService aggregation;
 
@@ -70,6 +73,13 @@ public class SessionController {
                                       @RequestBody(required = false) Map<String, String> body) {
         String reason = body == null ? null : body.getOrDefault("reason", null);
         return aggregation.sessionView(sessions.cancel(sessionId, reason));
+    }
+
+    @PostMapping("/{sessionId}/offline")
+    public Map<String, Object> offline(@PathVariable String sessionId,
+                                       @RequestBody OfflineRequest request) {
+        return aggregation.sessionView(
+                sessions.markOffline(sessionId, request.keyId(), request.reason()));
     }
 
     @PostMapping("/{sessionId}/retry")

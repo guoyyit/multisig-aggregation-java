@@ -7,6 +7,7 @@ public enum ErrorCode {
     POP_INVALID("POP_INVALID", "公钥所有权证明验证失败"),
     KEY_NOT_FOUND("KEY_NOT_FOUND", "公钥不存在"),
     DUPLICATE_KEY_ID("DUPLICATE_KEY_ID", "密钥 ID 已存在"),
+    DUPLICATE_PUBLIC_KEY("DUPLICATE_PUBLIC_KEY", "同一公钥已以其他密钥 ID 注册"),
     KEY_REVOKED("KEY_REVOKED", "公钥已被撤销"),
     KEY_SUPERSEDED("KEY_SUPERSEDED", "公钥已被轮换取代"),
     INVALID_MESSAGE("INVALID_MESSAGE", "消息编码无效"),
